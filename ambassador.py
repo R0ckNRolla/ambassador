@@ -1,4 +1,6 @@
 #! /usr/bin/env python
+import uuid
+from uuid import UUID
 import requests
 import json
 import sys
@@ -6,6 +8,7 @@ import os
 import asyncio
 import logging
 
+from eth_account.messages import defunct_hash_message
 from web3.auto import w3 as web3
 from web3 import Web3,HTTPProvider
 from web3.middleware import geth_poa_middleware
@@ -23,6 +26,7 @@ BOUNTY_DURATION = os.environ.get('BOUNTY_DURATION',25)
 
 logging.debug('using account ' + ACCOUNT + "...")
 
+EXPERT='0x05328f171b8c1463eafdacca478d9ee6a1d923f8'
 
 # Description: File class to hold sufficient data for bounty creation
 # TODO: 
@@ -119,7 +123,7 @@ class Artifact:
                     raw = bytes(s['rawTransaction']).hex()
                     signed.append(raw)
                 logging.debug('***********************\nPOSTING SIGNED TXNs, count #= ' + str(cnt) + '\n***********************\n')
-                r = requests.post('http://polyswarmd:31337/transactions', json={'transactions': signed})
+                r = requests.post('http://' + HOST + '/transactions', json={'transactions': signed})
                 logging.debug(r.json())
                 if r.json()['status'] == 'OK':
                     logging.info("\n\nBounty "+self.file.name+" sent to polyswarmd.\n\n")
@@ -131,6 +135,8 @@ def jsonify(encoded):
         try:
                 decoded = encoded.json()
         except ValueError:
+                logging.debug('account: ' +ACCOUNT.upper()) 
+
                 sys.exit("Error in jsonify: ", sys.exc_info()[0])
         return decoded
 
@@ -183,7 +189,65 @@ def getFiles():
                 files.append(tmp)
 
         return files
+
+def post_transaction(transactions, key):
+    signed = []
+
+    for tx in transactions:
+        s = web3.eth.account.signTransaction(tx, key)
+        raw = bytes(s['rawTransaction']).hex()
+        signed.append(raw)
+
+    r = requests.post('http://' + HOST + '/transactions', json={'transactions': signed})
+
+    return r
+
+def sign_state(state, private_key):
+    state_hash = defunct_hash_message(text=state)
+    signed_state = w3.eth.account.signHash(state_hash, private_key=private_key)
+
+    return signed_state
+
+def gen_state(**kwargs):
+
+    print(kwargs)
+
+    r = requests.post('http://' + HOST + '/offers/state', json=kwargs)
+    return (r.json())
+
+def open_offer_channel():
+    key = web3.eth.account.decrypt(open(KEYFILE,'r').read(), PASSWORD)
+
+    # create offer channgel
+    r = requests.post('http://' + HOST + '/offers?account=' + ACCOUNT, json={'ambassador': ACCOUNT, 'expert': EXPERT, 'settlementPeriodLength': 100})
+    transactions = (r.json()['result']['transactions'])
+    offer_info = post_transaction(transactions, key).json()['result']['offers_initialized'][0] # TODO fix 0??
+    logging.debug(offer_info)
+
+    guid = str(UUID(int=offer_info['guid'], version=4))
+
+    msig = offer_info['msig']
+    
+    # set communication uri
+    r = requests.post('http://' + HOST + '/offers/' + str(uuid.uuid4()) + '/uri?account=' + ACCOUNT, json={'websocketUri': 'ws//:' + HOST + '/messages'})
+    transactions = (r.json()['result']['transactions'])
+    logging.debug(transactions)
+    logging.debug(post_transaction(transactions, key).json())
+
+    # TODO fix guid int issue
+    state = gen_state(close_flag=1, nonce=0, ambassador=ACCOUNT, expert=EXPERT, msig_address=msig, ambassador_balance=30, expert_balance=0, guid=str(offer_info['guid']), offer_amount=1)['result']['state']
+
+    sig = sign_state(state, key)
+
+    # open channel to be joined
+    r = requests.post('http://' + HOST + '/offers/' + str(uuid.uuid4()) + '/open?account=' + ACCOUNT, json={'r':web3.toHex(sig.r), 'v':sig.v, 's':web3.toHex(sig.s), 'state': state})
+    transactions = (r.json()['result']['transactions'])
+    post_transaction(transactions, key)
+
+
 if __name__ == "__main__":
+        # TODO: Create cli option to select offers or bounties        
+        open_offer_channel()
 
         #default bounties to post
         numBountiesToPost = 2
